@@ -11,6 +11,19 @@ interface Track {
   file?: File;
   title: string;
   url: string;
+  duration?: number;
+  categoryId?: string;
+}
+
+interface JingleCategory {
+  id: string;
+  name: string;
+}
+
+interface CommercialBreak {
+  id: string;
+  name: string;
+  jingleIds: string[];
 }
 
 interface Program {
@@ -25,7 +38,7 @@ interface Program {
 
 export default function App() {
   // --- State ---
-  const [activeTab, setActiveTab] = useState<'playlist' | 'jingles' | 'programs'>('playlist');
+  const [activeTab, setActiveTab] = useState<'playlist' | 'jingles' | 'programs' | 'commercials'>('playlist');
   
   // Playlist
   const [queue, setQueue] = useState<Track[]>([]);
@@ -36,12 +49,24 @@ export default function App() {
   
   // Jingles (Vinhetas)
   const [jingles, setJingles] = useState<Track[]>([]);
+  const [jingleCategories, setJingleCategories] = useState<JingleCategory[]>([
+    { id: 'default', name: 'Geral' },
+    { id: 'patrocinio', name: 'Patrocínio' },
+    { id: 'comercial', name: 'Comercial' },
+    { id: 'efeito', name: 'Efeito' }
+  ]);
   const [autoJingleInterval, setAutoJingleInterval] = useState(3); // Play jingle every X tracks
   const [tracksPlayed, setTracksPlayed] = useState(0);
   const [isJinglePlaying, setIsJinglePlaying] = useState(false);
   const [currentJingleIndex, setCurrentJingleIndex] = useState(-1);
+  
+  // Jingle Queue & Commercial Breaks
+  const [jingleQueue, setJingleQueue] = useState<Track[]>([]);
+  const [commercialBreaks, setCommercialBreaks] = useState<CommercialBreak[]>([]);
+  const [isBreakActive, setIsBreakActive] = useState(false);
+  const [breakRemainingTime, setBreakRemainingTime] = useState(0);
 
-  const [selectedJingleId, setSelectedJingleId] = useState<string>('');
+  const [selectedJingleIds, setSelectedJingleIds] = useState<string[]>([]);
 
   // Programs
   const [programs, setPrograms] = useState<Program[]>([]);
@@ -73,16 +98,18 @@ export default function App() {
   const stateRef = useRef({
     queue, currentIndex, isShuffle, crossfadeTime, 
     jingles, autoJingleInterval, tracksPlayed, isJinglePlaying,
-    masterVolume, liveFader, micActive, pcLiveActive
+    masterVolume, liveFader, micActive, pcLiveActive,
+    jingleQueue, isBreakActive, breakRemainingTime
   });
 
   useEffect(() => {
     stateRef.current = {
       queue, currentIndex, isShuffle, crossfadeTime, 
       jingles, autoJingleInterval, tracksPlayed, isJinglePlaying,
-      masterVolume, liveFader, micActive, pcLiveActive
+      masterVolume, liveFader, micActive, pcLiveActive,
+      jingleQueue, isBreakActive, breakRemainingTime
     };
-  }, [queue, currentIndex, isShuffle, crossfadeTime, jingles, autoJingleInterval, tracksPlayed, isJinglePlaying, masterVolume, liveFader, micActive, pcLiveActive]);
+  }, [queue, currentIndex, isShuffle, crossfadeTime, jingles, autoJingleInterval, tracksPlayed, isJinglePlaying, masterVolume, liveFader, micActive, pcLiveActive, jingleQueue, isBreakActive, breakRemainingTime]);
 
   // --- Volume Management ---
   useEffect(() => {
@@ -100,14 +127,28 @@ export default function App() {
   }, [masterVolume, liveFader, micActive]);
 
   // --- File Uploads ---
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'track' | 'jingle') => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'track' | 'jingle') => {
     if (e.target.files) {
-      const newItems = Array.from(e.target.files).map((file) => ({
-        id: Math.random().toString(36).substring(7),
-        file,
-        title: file.name.replace(/\.[^/.]+$/, ""),
-        url: URL.createObjectURL(file)
-      }));
+      const files = Array.from(e.target.files) as File[];
+      const newItems: Track[] = [];
+      
+      for (const file of files) {
+        const url = URL.createObjectURL(file);
+        const duration = await new Promise<number>((resolve) => {
+          const audio = new Audio(url);
+          audio.addEventListener('loadedmetadata', () => resolve(audio.duration));
+          audio.addEventListener('error', () => resolve(0));
+        });
+        
+        newItems.push({
+          id: Math.random().toString(36).substring(7),
+          file,
+          title: file.name.replace(/\.[^/.]+$/, ""),
+          url,
+          duration,
+          categoryId: type === 'jingle' ? 'default' : undefined
+        });
+      }
       
       if (type === 'track') {
         setQueue(prev => [...prev, ...newItems]);
@@ -180,23 +221,62 @@ export default function App() {
     setIsPlaying(true);
   };
 
-  const playJingle = (index: number, action: 'resume' | 'next' = 'resume') => {
+  const playJingleSequence = (jinglesToPlay: Track[], isCommercialBreak: boolean = false, action: 'resume' | 'next' = 'resume') => {
+    if (jinglesToPlay.length === 0) return;
+    
     const s = stateRef.current;
-    const jingle = s.jingles[index];
-    if (!jingle || !jingleAudioRef.current) return;
-
-    // Pause main audio
     const currentAudio = activeAudioRef.current === 1 ? audio1Ref.current : audio2Ref.current;
-    if (currentAudio) currentAudio.pause();
+    
+    if (currentAudio && s.isPlaying) {
+      if (isCommercialBreak && s.crossfadeTime > 0) {
+        // Fade out
+        const steps = 20;
+        const stepTime = (s.crossfadeTime * 1000) / steps;
+        let currentStep = 0;
+        const initialVol = currentAudio.volume;
+        
+        if (crossfadeIntervalRef.current) clearInterval(crossfadeIntervalRef.current);
+        
+        crossfadeIntervalRef.current = setInterval(() => {
+          currentStep++;
+          const ratio = currentStep / steps;
+          currentAudio.volume = Math.max(0, initialVol * (1 - ratio));
+          
+          if (currentStep >= steps) {
+            clearInterval(crossfadeIntervalRef.current!);
+            currentAudio.pause();
+          }
+        }, stepTime);
+      } else {
+        currentAudio.pause();
+      }
+    }
+    
+    setJingleQueue(jinglesToPlay.slice(1));
+    setIsBreakActive(isCommercialBreak);
+    
+    if (isCommercialBreak) {
+      const totalDuration = jinglesToPlay.reduce((acc, j) => acc + (j.duration || 0), 0);
+      setBreakRemainingTime(totalDuration);
+    }
     
     jingleActionRef.current = action;
     setIsJinglePlaying(true);
-    setCurrentJingleIndex(index);
+    setCurrentJingleIndex(s.jingles.findIndex(j => j.id === jinglesToPlay[0].id));
     isJingleTransitioningRef.current = false;
     
-    jingleAudioRef.current.src = jingle.url;
-    jingleAudioRef.current.volume = s.masterVolume;
-    jingleAudioRef.current.play().catch(console.error);
+    if (jingleAudioRef.current) {
+      jingleAudioRef.current.src = jinglesToPlay[0].url;
+      jingleAudioRef.current.volume = s.masterVolume;
+      jingleAudioRef.current.play().catch(console.error);
+    }
+  };
+
+  const playJingle = (index: number, action: 'resume' | 'next' = 'resume') => {
+    const s = stateRef.current;
+    const jingle = s.jingles[index];
+    if (!jingle) return;
+    playJingleSequence([jingle], false, action);
   };
 
   const handleJingleTimeUpdate = () => {
@@ -205,7 +285,21 @@ export default function App() {
 
     const remaining = jingleAudioRef.current.duration - jingleAudioRef.current.currentTime;
     
+    if (s.isBreakActive) {
+      // Update break remaining time
+      const queueDuration = s.jingleQueue.reduce((acc, j) => acc + (j.duration || 0), 0);
+      const newRemaining = Math.ceil(remaining + queueDuration);
+      if (newRemaining !== s.breakRemainingTime) {
+        setBreakRemainingTime(newRemaining);
+      }
+    }
+
     if (remaining <= s.crossfadeTime && remaining > 0 && !isJingleTransitioningRef.current) {
+      if (s.jingleQueue.length > 0) {
+        // Do not crossfade between jingles in a sequence, wait for it to end
+        return;
+      }
+
       isJingleTransitioningRef.current = true;
       
       if (jingleActionRef.current === 'next') {
@@ -213,6 +307,7 @@ export default function App() {
           const nextIdx = getNextIndex();
           if (nextIdx !== -1) {
             setIsJinglePlaying(false);
+            setIsBreakActive(false);
             playTrack(nextIdx, true);
           }
         }
@@ -221,7 +316,34 @@ export default function App() {
         const currentAudio = activeAudioRef.current === 1 ? audio1Ref.current : audio2Ref.current;
         if (s.isPlaying && currentAudio) {
           setIsJinglePlaying(false);
-          currentAudio.play().catch(console.error);
+          setIsBreakActive(false);
+          
+          const targetVol = s.masterVolume * (1 - s.liveFader / 100) * (s.micActive ? 0.3 : 1);
+          
+          if (s.crossfadeTime > 0) {
+            currentAudio.volume = 0;
+            currentAudio.play().catch(console.error);
+            
+            const steps = 20;
+            const stepTime = (s.crossfadeTime * 1000) / steps;
+            let currentStep = 0;
+            
+            if (crossfadeIntervalRef.current) clearInterval(crossfadeIntervalRef.current);
+            
+            crossfadeIntervalRef.current = setInterval(() => {
+              currentStep++;
+              const ratio = currentStep / steps;
+              currentAudio.volume = Math.min(targetVol, targetVol * ratio);
+              
+              if (currentStep >= steps) {
+                clearInterval(crossfadeIntervalRef.current!);
+                currentAudio.volume = targetVol;
+              }
+            }, stepTime);
+          } else {
+            currentAudio.volume = targetVol;
+            currentAudio.play().catch(console.error);
+          }
         }
       }
     }
@@ -229,11 +351,26 @@ export default function App() {
 
   const handleJingleEnded = () => {
     if (!isJingleTransitioningRef.current) {
+      const s = stateRef.current;
+      
+      if (s.jingleQueue.length > 0) {
+        // Play next jingle in queue
+        const nextJingle = s.jingleQueue[0];
+        setJingleQueue(prev => prev.slice(1));
+        setCurrentJingleIndex(s.jingles.findIndex(j => j.id === nextJingle.id));
+        isJingleTransitioningRef.current = false;
+        
+        if (jingleAudioRef.current) {
+          jingleAudioRef.current.src = nextJingle.url;
+          jingleAudioRef.current.play().catch(console.error);
+        }
+        return;
+      }
+
       setIsJinglePlaying(false);
       setCurrentJingleIndex(-1);
       setTracksPlayed(0);
-      
-      const s = stateRef.current;
+      setIsBreakActive(false);
       
       if (jingleActionRef.current === 'next') {
         if (s.queue.length > 0) {
@@ -244,7 +381,32 @@ export default function App() {
         // Resume current track
         const currentAudio = activeAudioRef.current === 1 ? audio1Ref.current : audio2Ref.current;
         if (s.isPlaying && currentAudio) {
-          currentAudio.play().catch(console.error);
+          const targetVol = s.masterVolume * (1 - s.liveFader / 100) * (s.micActive ? 0.3 : 1);
+          
+          if (s.crossfadeTime > 0) {
+            currentAudio.volume = 0;
+            currentAudio.play().catch(console.error);
+            
+            const steps = 20;
+            const stepTime = (s.crossfadeTime * 1000) / steps;
+            let currentStep = 0;
+            
+            if (crossfadeIntervalRef.current) clearInterval(crossfadeIntervalRef.current);
+            
+            crossfadeIntervalRef.current = setInterval(() => {
+              currentStep++;
+              const ratio = currentStep / steps;
+              currentAudio.volume = Math.min(targetVol, targetVol * ratio);
+              
+              if (currentStep >= steps) {
+                clearInterval(crossfadeIntervalRef.current!);
+                currentAudio.volume = targetVol;
+              }
+            }, stepTime);
+          } else {
+            currentAudio.volume = targetVol;
+            currentAudio.play().catch(console.error);
+          }
         }
       }
     } else {
@@ -438,10 +600,16 @@ export default function App() {
               <Layers className="w-4 h-4" /> Vinhetas
             </button>
             <button 
+              onClick={() => setActiveTab('commercials')}
+              className={`flex-1 py-2 text-sm font-medium rounded-lg flex items-center justify-center gap-2 transition-colors ${activeTab === 'commercials' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+            >
+              <Clock className="w-4 h-4" /> Comerciais
+            </button>
+            <button 
               onClick={() => setActiveTab('programs')}
               className={`flex-1 py-2 text-sm font-medium rounded-lg flex items-center justify-center gap-2 transition-colors ${activeTab === 'programs' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
             >
-              <Clock className="w-4 h-4" /> Programas
+              <Radio className="w-4 h-4" /> Programas
             </button>
           </div>
 
@@ -553,11 +721,28 @@ export default function App() {
                     </div>
                   ) : (
                     jingles.map((jingle, idx) => (
-                      <div key={jingle.id} className={`p-2 rounded-lg border flex items-center gap-3 ${idx === currentJingleIndex ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-zinc-950 border-zinc-800 text-zinc-300'}`}>
-                        <button onClick={() => playJingle(idx)} className="w-6 h-6 flex items-center justify-center hover:text-amber-400 bg-zinc-800 rounded">
-                          <PlayCircle className="w-4 h-4" />
-                        </button>
-                        <span className="truncate flex-1 text-sm">{jingle.title}</span>
+                      <div key={jingle.id} className={`p-2 rounded-lg border flex flex-col gap-2 ${idx === currentJingleIndex ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-zinc-950 border-zinc-800 text-zinc-300'}`}>
+                        <div className="flex items-center gap-3">
+                          <button onClick={() => playJingle(idx)} className="w-6 h-6 flex items-center justify-center hover:text-amber-400 bg-zinc-800 rounded">
+                            <PlayCircle className="w-4 h-4" />
+                          </button>
+                          <span className="truncate flex-1 text-sm">{jingle.title}</span>
+                          <span className="text-xs text-zinc-500">{formatTime(jingle.duration || 0)}</span>
+                        </div>
+                        <div className="flex items-center gap-2 pl-9">
+                          <span className="text-xs text-zinc-500">Categoria:</span>
+                          <select 
+                            value={jingle.categoryId || 'default'}
+                            onChange={(e) => {
+                              const newJ = [...jingles];
+                              newJ[idx].categoryId = e.target.value;
+                              setJingles(newJ);
+                            }}
+                            className="bg-zinc-800 text-xs rounded px-2 py-1 outline-none text-zinc-300"
+                          >
+                            {jingleCategories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                          </select>
+                        </div>
                       </div>
                     ))
                   )}
@@ -635,6 +820,118 @@ export default function App() {
                 </div>
               </>
             )}
+
+            {/* COMMERCIALS TAB */}
+            {activeTab === 'commercials' && (
+              <>
+                <div className="mb-4 flex justify-between items-center">
+                  <h3 className="text-sm font-bold text-zinc-300">Intervalos Comerciais</h3>
+                  <button 
+                    onClick={() => {
+                      const newBreak: CommercialBreak = {
+                        id: Math.random().toString(36).substring(7),
+                        name: `Intervalo ${commercialBreaks.length + 1}`,
+                        jingleIds: []
+                      };
+                      setCommercialBreaks([...commercialBreaks, newBreak]);
+                    }} 
+                    className="bg-zinc-800 hover:bg-zinc-700 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center gap-1"
+                  >
+                    <Plus className="w-4 h-4" /> NOVO INTERVALO
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+                  {commercialBreaks.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-zinc-500 text-sm text-center">
+                      <Clock className="w-8 h-8 mb-2 opacity-30" />
+                      Crie intervalos comerciais
+                    </div>
+                  ) : (
+                    commercialBreaks.map((cBreak, idx) => {
+                      const breakDuration = cBreak.jingleIds.reduce((acc, id) => {
+                        const j = jingles.find(j => j.id === id);
+                        return acc + (j?.duration || 0);
+                      }, 0);
+
+                      return (
+                        <div key={cBreak.id} className="bg-zinc-950 border border-zinc-800 p-3 rounded-xl space-y-3">
+                          <div className="flex items-center justify-between">
+                            <input 
+                              type="text" 
+                              value={cBreak.name}
+                              onChange={(e) => {
+                                const newB = [...commercialBreaks];
+                                newB[idx].name = e.target.value;
+                                setCommercialBreaks(newB);
+                              }}
+                              className="flex-1 bg-transparent font-bold text-white outline-none border-b border-zinc-800 focus:border-emerald-500"
+                            />
+                            <span className="text-xs text-zinc-500 ml-2">{formatTime(breakDuration)}</span>
+                          </div>
+                          
+                          <div className="space-y-2">
+                            <label className="text-xs text-zinc-500 block">Adicionar Vinheta/Comercial:</label>
+                            <div className="flex gap-2">
+                              <select 
+                                className="flex-1 bg-zinc-800 text-xs rounded px-2 py-2 outline-none"
+                                onChange={(e) => {
+                                  if (e.target.value) {
+                                    const newB = [...commercialBreaks];
+                                    newB[idx].jingleIds.push(e.target.value);
+                                    setCommercialBreaks(newB);
+                                    e.target.value = '';
+                                  }
+                                }}
+                                defaultValue=""
+                              >
+                                <option value="" disabled>Selecione...</option>
+                                {jingles.map(j => <option key={j.id} value={j.id}>{j.title}</option>)}
+                              </select>
+                            </div>
+                            
+                            {cBreak.jingleIds.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                {cBreak.jingleIds.map((jId, jIdx) => {
+                                  const jingle = jingles.find(j => j.id === jId);
+                                  return (
+                                    <div key={`${jId}-${jIdx}`} className="flex items-center justify-between bg-zinc-900 p-1.5 rounded text-xs">
+                                      <span className="truncate flex-1">{jingle?.title || 'Desconhecido'}</span>
+                                      <button 
+                                        onClick={() => {
+                                          const newB = [...commercialBreaks];
+                                          newB[idx].jingleIds.splice(jIdx, 1);
+                                          setCommercialBreaks(newB);
+                                        }}
+                                        className="text-red-400 hover:text-red-300 ml-2"
+                                      >
+                                        Remover
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          
+                          <button 
+                            onClick={() => {
+                              const jinglesToPlay = cBreak.jingleIds.map(id => jingles.find(j => j.id === id)).filter(Boolean) as Track[];
+                              if (jinglesToPlay.length > 0) {
+                                playJingleSequence(jinglesToPlay, true, 'resume');
+                              }
+                            }}
+                            disabled={cBreak.jingleIds.length === 0 || isJinglePlaying}
+                            className="w-full bg-amber-500 hover:bg-amber-400 text-zinc-950 py-2 rounded-lg text-sm font-bold disabled:opacity-50 flex items-center justify-center gap-2"
+                          >
+                            <PlayCircle className="w-4 h-4" /> INICIAR INTERVALO
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -692,28 +989,69 @@ export default function App() {
 
             {/* Manual Jingle Trigger */}
             <div className="mt-8 pt-6 border-t border-zinc-800 relative z-10">
-              <div className="flex items-center gap-3">
-                <select 
-                  value={selectedJingleId}
-                  onChange={(e) => setSelectedJingleId(e.target.value)}
-                  className="flex-1 bg-zinc-950 border border-zinc-800 text-sm rounded-xl px-4 py-3 outline-none text-zinc-300 focus:border-amber-500 transition-colors"
-                >
-                  <option value="">Selecione uma vinheta para rodar...</option>
-                  {jingles.map(j => <option key={j.id} value={j.id}>{j.title}</option>)}
-                </select>
-                <button 
-                  onClick={() => {
-                    const idx = jingles.findIndex(j => j.id === selectedJingleId);
-                    if (idx !== -1) playJingle(idx, 'next');
-                  }}
-                  disabled={!selectedJingleId || isJinglePlaying}
-                  className="bg-amber-500 hover:bg-amber-400 text-zinc-950 px-6 py-3 rounded-xl text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-amber-500/20"
-                >
-                  <PlayCircle className="w-5 h-5" /> Rodar Vinheta
-                </button>
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-3">
+                  <select 
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setSelectedJingleIds([...selectedJingleIds, e.target.value]);
+                        e.target.value = '';
+                      }
+                    }}
+                    defaultValue=""
+                    className="flex-1 bg-zinc-950 border border-zinc-800 text-sm rounded-xl px-4 py-3 outline-none text-zinc-300 focus:border-amber-500 transition-colors"
+                  >
+                    <option value="" disabled>Adicionar vinheta à fila...</option>
+                    {jingles.map(j => <option key={j.id} value={j.id}>{j.title}</option>)}
+                  </select>
+                  <button 
+                    onClick={() => {
+                      const jinglesToPlay = selectedJingleIds.map(id => jingles.find(j => j.id === id)).filter(Boolean) as Track[];
+                      if (jinglesToPlay.length > 0) {
+                        playJingleSequence(jinglesToPlay, false, 'next');
+                        setSelectedJingleIds([]);
+                      }
+                    }}
+                    disabled={selectedJingleIds.length === 0 || isJinglePlaying}
+                    className="bg-amber-500 hover:bg-amber-400 text-zinc-950 px-6 py-3 rounded-xl text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-amber-500/20"
+                  >
+                    <PlayCircle className="w-5 h-5" /> Rodar Fila ({selectedJingleIds.length})
+                  </button>
+                </div>
+                {selectedJingleIds.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {selectedJingleIds.map((id, idx) => {
+                      const jingle = jingles.find(j => j.id === id);
+                      return (
+                        <div key={`${id}-${idx}`} className="bg-zinc-800 text-xs px-2 py-1 rounded flex items-center gap-2">
+                          <span className="truncate max-w-[150px]">{jingle?.title}</span>
+                          <button onClick={() => setSelectedJingleIds(prev => prev.filter((_, i) => i !== idx))} className="text-zinc-400 hover:text-red-400">×</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>
+
+          {/* Commercial Break Overlay */}
+          {isBreakActive && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+              <div className="flex flex-col items-center text-center">
+                <h2 className="text-4xl font-bold text-amber-500 mb-8 uppercase tracking-widest">Intervalo Comercial</h2>
+                <div className={`text-9xl font-mono font-bold ${breakRemainingTime <= 5 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
+                  {formatTime(breakRemainingTime)}
+                </div>
+                <p className="text-zinc-400 mt-8 text-xl">
+                  {jingles[currentJingleIndex]?.title || 'Aguarde...'}
+                </p>
+                <p className="text-zinc-500 mt-2">
+                  A transmissão retornará automaticamente.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Live Mixer Section */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-xl flex flex-col gap-6">
