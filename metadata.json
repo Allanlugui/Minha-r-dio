@@ -1,0 +1,5 @@
+{
+  "name": "AI Web Radio MVP",
+  "description": "Uma Web Rádio Inteligente onde o Gemini atua como programador musical e locutor.",
+  "requestFramePermissions": []
+}
