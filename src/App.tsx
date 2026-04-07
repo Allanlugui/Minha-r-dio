@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Peer } from 'peerjs';
 import { 
   Radio, Play, Pause, SkipForward, SkipBack, 
   Mic, MicOff, Volume2, VolumeX, Plus, 
@@ -98,8 +99,13 @@ export default function App() {
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const destRef = useRef<MediaStreamAudioDestinationNode | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+  
+  const peerRef = useRef<Peer | null>(null);
+  const connectionsRef = useRef<Set<any>>(new Set());
+  const [radioId, setRadioId] = useState<string>('');
+  const [customRadioId, setCustomRadioId] = useState('minha-radio-ao-vivo');
+  const [listenersCount, setListenersCount] = useState(0);
+  
   const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const gainsRef = useRef<{
     audio1?: GainNode;
@@ -195,13 +201,14 @@ export default function App() {
 
   const toggleBroadcast = () => {
     if (isBroadcasting) {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
+      if (peerRef.current) {
+        peerRef.current.destroy();
+        peerRef.current = null;
       }
       setIsBroadcasting(false);
+      setRadioId('');
+      setListenersCount(0);
+      connectionsRef.current.clear();
       return;
     }
 
@@ -240,27 +247,33 @@ export default function App() {
       audioCtxRef.current.resume();
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    wsRef.current = new WebSocket(`${protocol}//${window.location.host}/broadcast`);
-
-    wsRef.current.onopen = () => {
+    // Start PeerJS
+    const peer = new Peer(customRadioId || undefined);
+    
+    peer.on('open', (id) => {
+      setRadioId(id);
       setIsBroadcasting(true);
-      mediaRecorderRef.current = new MediaRecorder(destRef.current!.stream, {
-        mimeType: 'audio/webm;codecs=opus'
+    });
+
+    peer.on('call', (call) => {
+      call.answer(destRef.current!.stream);
+      
+      connectionsRef.current.add(call);
+      setListenersCount(connectionsRef.current.size);
+
+      call.on('close', () => {
+        connectionsRef.current.delete(call);
+        setListenersCount(connectionsRef.current.size);
       });
+    });
 
-      mediaRecorderRef.current.ondataavailable = (e) => {
-        if (e.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(e.data);
-        }
-      };
-
-      mediaRecorderRef.current.start(1000);
-    };
-
-    wsRef.current.onclose = () => {
+    peer.on('error', (err) => {
+      console.error('PeerJS error:', err);
+      alert('Erro na transmissão: ' + err.message);
       setIsBroadcasting(false);
-    };
+    });
+
+    peerRef.current = peer;
   };
 
   const playTrack = (index: number, crossfade = false) => {
@@ -672,18 +685,30 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <div className="flex flex-col items-end">
-              <button 
-                onClick={toggleBroadcast}
-                className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${isBroadcasting ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 animate-pulse' : 'bg-emerald-500 hover:bg-emerald-600 text-zinc-950 shadow-lg shadow-emerald-500/20'}`}
-              >
-                <Radio className="w-4 h-4" />
-                {isBroadcasting ? 'PARAR TRANSMISSÃO' : 'TRANSMITIR AO VIVO'}
-              </button>
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex items-center gap-2">
+                {!isBroadcasting && (
+                  <input 
+                    type="text" 
+                    value={customRadioId}
+                    onChange={(e) => setCustomRadioId(e.target.value)}
+                    placeholder="ID da Rádio"
+                    className="bg-zinc-800 text-xs px-3 py-2 rounded-lg border border-zinc-700 text-white w-40 focus:outline-none focus:border-emerald-500"
+                  />
+                )}
+                <button 
+                  onClick={toggleBroadcast}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${isBroadcasting ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 animate-pulse' : 'bg-emerald-500 hover:bg-emerald-600 text-zinc-950 shadow-lg shadow-emerald-500/20'}`}
+                >
+                  <Radio className="w-4 h-4" />
+                  {isBroadcasting ? 'PARAR TRANSMISSÃO' : 'TRANSMITIR AO VIVO'}
+                </button>
+              </div>
               {isBroadcasting && (
-                <span className="text-[10px] text-zinc-400 mt-1">
-                  Stream: {window.location.origin}/stream
-                </span>
+                <div className="text-[10px] text-zinc-400 flex items-center gap-3">
+                  <span>ID: <strong className="text-emerald-400 select-all text-xs">{radioId || 'Conectando...'}</strong></span>
+                  <span>Ouvintes: <strong className="text-white text-xs">{listenersCount}</strong></span>
+                </div>
               )}
             </div>
             <div className="flex items-center gap-2 bg-zinc-800 px-3 py-1.5 rounded-lg">
