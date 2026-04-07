@@ -94,6 +94,30 @@ export default function App() {
   const jingleActionRef = useRef<'resume' | 'next'>('resume');
   const isJingleTransitioningRef = useRef(false);
 
+  // Broadcast Refs
+  const [isBroadcasting, setIsBroadcasting] = useState(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const destRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const gainsRef = useRef<{
+    audio1?: GainNode;
+    audio2?: GainNode;
+    jingle?: GainNode;
+    live?: GainNode;
+  }>({});
+
+  // Helper to set volume for both HTMLAudioElement and Web Audio API GainNode
+  const setAudioVolume = (audioEl: HTMLAudioElement | null, volume: number) => {
+    if (!audioEl) return;
+    audioEl.volume = volume;
+    if (audioEl === audio1Ref.current && gainsRef.current.audio1) gainsRef.current.audio1.gain.value = volume;
+    if (audioEl === audio2Ref.current && gainsRef.current.audio2) gainsRef.current.audio2.gain.value = volume;
+    if (audioEl === jingleAudioRef.current && gainsRef.current.jingle) gainsRef.current.jingle.gain.value = volume;
+    if (audioEl === liveAudioRef.current && gainsRef.current.live) gainsRef.current.live.gain.value = volume;
+  };
+
   // Mutable refs for callbacks
   const stateRef = useRef({
     queue, currentIndex, isShuffle, crossfadeTime, 
@@ -120,10 +144,10 @@ export default function App() {
     // Auto-ducking if mic is active
     const duckedPlaylistVol = s.micActive ? playlistVol * 0.2 : playlistVol;
     
-    if (audio1Ref.current && !isCrossfadingRef.current) audio1Ref.current.volume = duckedPlaylistVol;
-    if (audio2Ref.current && !isCrossfadingRef.current) audio2Ref.current.volume = duckedPlaylistVol;
-    if (jingleAudioRef.current) jingleAudioRef.current.volume = s.masterVolume; // Jingles bypass fader
-    if (liveAudioRef.current) liveAudioRef.current.volume = liveVol;
+    if (audio1Ref.current && !isCrossfadingRef.current) setAudioVolume(audio1Ref.current, duckedPlaylistVol);
+    if (audio2Ref.current && !isCrossfadingRef.current) setAudioVolume(audio2Ref.current, duckedPlaylistVol);
+    if (jingleAudioRef.current) setAudioVolume(jingleAudioRef.current, s.masterVolume); // Jingles bypass fader
+    if (liveAudioRef.current) setAudioVolume(liveAudioRef.current, liveVol);
   }, [masterVolume, liveFader, micActive]);
 
   // --- File Uploads ---
@@ -169,6 +193,76 @@ export default function App() {
     return (stateRef.current.currentIndex + 1) % q.length;
   };
 
+  const toggleBroadcast = () => {
+    if (isBroadcasting) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      setIsBroadcasting(false);
+      return;
+    }
+
+    if (!audioCtxRef.current) {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioContextClass();
+      destRef.current = audioCtxRef.current.createMediaStreamDestination();
+
+      const setupSource = (el: HTMLAudioElement | null, key: keyof typeof gainsRef.current) => {
+        if (el && !gainsRef.current[key]) {
+          const source = audioCtxRef.current!.createMediaElementSource(el);
+          const gainNode = audioCtxRef.current!.createGain();
+          
+          gainNode.gain.value = el.volume;
+          
+          source.connect(gainNode);
+          gainNode.connect(destRef.current!);
+          gainNode.connect(audioCtxRef.current!.destination);
+          
+          gainsRef.current[key] = gainNode;
+        }
+      };
+
+      setupSource(audio1Ref.current, 'audio1');
+      setupSource(audio2Ref.current, 'audio2');
+      setupSource(jingleAudioRef.current, 'jingle');
+      setupSource(liveAudioRef.current, 'live');
+
+      if (micStreamRef.current && !micSourceNodeRef.current) {
+        micSourceNodeRef.current = audioCtxRef.current.createMediaStreamSource(micStreamRef.current);
+        micSourceNodeRef.current.connect(destRef.current);
+      }
+    }
+
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    wsRef.current = new WebSocket(`${protocol}//${window.location.host}/broadcast`);
+
+    wsRef.current.onopen = () => {
+      setIsBroadcasting(true);
+      mediaRecorderRef.current = new MediaRecorder(destRef.current!.stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
+
+      mediaRecorderRef.current.ondataavailable = (e) => {
+        if (e.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(e.data);
+        }
+      };
+
+      mediaRecorderRef.current.start(1000);
+    };
+
+    wsRef.current.onclose = () => {
+      setIsBroadcasting(false);
+    };
+  };
+
   const playTrack = (index: number, crossfade = false) => {
     const s = stateRef.current;
     if (s.isJinglePlaying) return; // Don't start track if jingle is playing
@@ -186,7 +280,7 @@ export default function App() {
     if (crossfade && s.crossfadeTime > 0) {
       isCrossfadingRef.current = true;
       nextAudio.src = track.url;
-      nextAudio.volume = 0;
+      setAudioVolume(nextAudio, 0);
       nextAudio.play().catch(console.error);
       
       const steps = 20;
@@ -198,8 +292,8 @@ export default function App() {
       crossfadeIntervalRef.current = setInterval(() => {
         currentStep++;
         const ratio = currentStep / steps;
-        currentAudio.volume = Math.max(0, finalVol * (1 - ratio));
-        nextAudio.volume = Math.min(finalVol, finalVol * ratio);
+        setAudioVolume(currentAudio, Math.max(0, finalVol * (1 - ratio)));
+        setAudioVolume(nextAudio, Math.min(finalVol, finalVol * ratio));
         
         if (currentStep >= steps) {
           clearInterval(crossfadeIntervalRef.current!);
@@ -214,7 +308,7 @@ export default function App() {
       currentAudio.pause();
       nextAudio.pause();
       currentAudio.src = track.url;
-      currentAudio.volume = finalVol;
+      setAudioVolume(currentAudio, finalVol);
       currentAudio.play().catch(console.error);
     }
     setCurrentIndex(index);
@@ -240,7 +334,7 @@ export default function App() {
         crossfadeIntervalRef.current = setInterval(() => {
           currentStep++;
           const ratio = currentStep / steps;
-          currentAudio.volume = Math.max(0, initialVol * (1 - ratio));
+          setAudioVolume(currentAudio, Math.max(0, initialVol * (1 - ratio)));
           
           if (currentStep >= steps) {
             clearInterval(crossfadeIntervalRef.current!);
@@ -267,7 +361,7 @@ export default function App() {
     
     if (jingleAudioRef.current) {
       jingleAudioRef.current.src = jinglesToPlay[0].url;
-      jingleAudioRef.current.volume = s.masterVolume;
+      setAudioVolume(jingleAudioRef.current, s.masterVolume);
       jingleAudioRef.current.play().catch(console.error);
     }
   };
@@ -321,7 +415,7 @@ export default function App() {
           const targetVol = s.masterVolume * (1 - s.liveFader / 100) * (s.micActive ? 0.3 : 1);
           
           if (s.crossfadeTime > 0) {
-            currentAudio.volume = 0;
+            setAudioVolume(currentAudio, 0);
             currentAudio.play().catch(console.error);
             
             const steps = 20;
@@ -333,15 +427,15 @@ export default function App() {
             crossfadeIntervalRef.current = setInterval(() => {
               currentStep++;
               const ratio = currentStep / steps;
-              currentAudio.volume = Math.min(targetVol, targetVol * ratio);
+              setAudioVolume(currentAudio, Math.min(targetVol, targetVol * ratio));
               
               if (currentStep >= steps) {
                 clearInterval(crossfadeIntervalRef.current!);
-                currentAudio.volume = targetVol;
+                setAudioVolume(currentAudio, targetVol);
               }
             }, stepTime);
           } else {
-            currentAudio.volume = targetVol;
+            setAudioVolume(currentAudio, targetVol);
             currentAudio.play().catch(console.error);
           }
         }
@@ -384,7 +478,7 @@ export default function App() {
           const targetVol = s.masterVolume * (1 - s.liveFader / 100) * (s.micActive ? 0.3 : 1);
           
           if (s.crossfadeTime > 0) {
-            currentAudio.volume = 0;
+            setAudioVolume(currentAudio, 0);
             currentAudio.play().catch(console.error);
             
             const steps = 20;
@@ -396,15 +490,15 @@ export default function App() {
             crossfadeIntervalRef.current = setInterval(() => {
               currentStep++;
               const ratio = currentStep / steps;
-              currentAudio.volume = Math.min(targetVol, targetVol * ratio);
+              setAudioVolume(currentAudio, Math.min(targetVol, targetVol * ratio));
               
               if (currentStep >= steps) {
                 clearInterval(crossfadeIntervalRef.current!);
-                currentAudio.volume = targetVol;
+                setAudioVolume(currentAudio, targetVol);
               }
             }, stepTime);
           } else {
-            currentAudio.volume = targetVol;
+            setAudioVolume(currentAudio, targetVol);
             currentAudio.play().catch(console.error);
           }
         }
@@ -514,13 +608,23 @@ export default function App() {
         micStreamRef.current.getTracks().forEach(t => t.stop());
         micStreamRef.current = null;
       }
+      if (micSourceNodeRef.current) {
+        micSourceNodeRef.current.disconnect();
+        micSourceNodeRef.current = null;
+      }
       setMicActive(false);
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         micStreamRef.current = stream;
-        // We don't play the mic back to the user to avoid feedback, 
-        // but in a real broadcasting app, this stream would be sent to the Icecast/Shoutcast server.
+        
+        // Connect to broadcast if active
+        if (audioCtxRef.current && destRef.current) {
+          micSourceNodeRef.current = audioCtxRef.current.createMediaStreamSource(stream);
+          // Only connect to broadcast destination, NOT local speakers (to avoid feedback)
+          micSourceNodeRef.current.connect(destRef.current);
+        }
+        
         setMicActive(true);
       } catch (err) {
         console.error("Error accessing microphone:", err);
@@ -568,6 +672,20 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <div className="flex flex-col items-end">
+              <button 
+                onClick={toggleBroadcast}
+                className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${isBroadcasting ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 animate-pulse' : 'bg-emerald-500 hover:bg-emerald-600 text-zinc-950 shadow-lg shadow-emerald-500/20'}`}
+              >
+                <Radio className="w-4 h-4" />
+                {isBroadcasting ? 'PARAR TRANSMISSÃO' : 'TRANSMITIR AO VIVO'}
+              </button>
+              {isBroadcasting && (
+                <span className="text-[10px] text-zinc-400 mt-1">
+                  Stream: {window.location.origin}/stream
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-2 bg-zinc-800 px-3 py-1.5 rounded-lg">
               <Volume2 className="w-4 h-4 text-zinc-400" />
               <input 
