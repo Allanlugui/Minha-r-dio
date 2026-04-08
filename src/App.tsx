@@ -4,8 +4,12 @@ import {
   Radio, Play, Pause, SkipForward, SkipBack, 
   Mic, MicOff, Volume2, VolumeX, Plus, 
   ListMusic, Upload, Shuffle, ArrowUp, ArrowDown,
-  MonitorUp, Clock, Layers, PlayCircle, StopCircle
+  MonitorUp, Clock, Layers, PlayCircle, StopCircle,
+  MessageSquare, Music2, CheckCircle2, UserCircle, Send
 } from 'lucide-react';
+import { db, auth, signInWithGoogle, logOut } from './firebase';
+import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, limit } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 
 interface Track {
   id: string;
@@ -114,6 +118,14 @@ export default function App() {
     live?: GainNode;
   }>({});
 
+  // Firebase State
+  const [user, setUser] = useState<any>(null);
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [musicRequests, setMusicRequests] = useState<any[]>([]);
+  const [newChatMessage, setNewChatMessage] = useState('');
+  const [activeSocialTab, setActiveSocialTab] = useState<'chat' | 'requests'>('chat');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
   // Helper to set volume for both HTMLAudioElement and Web Audio API GainNode
   const setAudioVolume = (audioEl: HTMLAudioElement | null, volume: number) => {
     if (!audioEl) return;
@@ -140,6 +152,59 @@ export default function App() {
       jingleQueue, isBreakActive, breakRemainingTime
     };
   }, [queue, currentIndex, isShuffle, crossfadeTime, jingles, autoJingleInterval, tracksPlayed, isJinglePlaying, masterVolume, liveFader, micActive, pcLiveActive, jingleQueue, isBreakActive, breakRemainingTime]);
+
+  // --- Firebase Effects ---
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+
+    const chatQuery = query(collection(db, 'chat'), orderBy('createdAt', 'asc'), limit(100));
+    const unsubscribeChat = onSnapshot(chatQuery, (snapshot) => {
+      const messages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setChatMessages(messages);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    });
+
+    const requestsQuery = query(collection(db, 'requests'), orderBy('createdAt', 'desc'), limit(50));
+    const unsubscribeRequests = onSnapshot(requestsQuery, (snapshot) => {
+      const reqs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setMusicRequests(reqs);
+    });
+
+    return () => {
+      unsubscribeAuth();
+      unsubscribeChat();
+      unsubscribeRequests();
+    };
+  }, []);
+
+  const handleSendChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChatMessage.trim() || !user) return;
+    
+    try {
+      await addDoc(collection(db, 'chat'), {
+        text: newChatMessage.trim(),
+        authorName: user.displayName || 'Anônimo',
+        authorUid: user.uid,
+        createdAt: serverTimestamp()
+      });
+      setNewChatMessage('');
+    } catch (error) {
+      console.error("Error sending message:", error);
+    }
+  };
+
+  const handleMarkRequestPlayed = async (id: string) => {
+    try {
+      await updateDoc(doc(db, 'requests', id), {
+        status: 'Tocada'
+      });
+    } catch (error) {
+      console.error("Error updating request:", error);
+    }
+  };
 
   // --- Volume Management ---
   useEffect(() => {
@@ -1252,6 +1317,140 @@ export default function App() {
               </div>
             </div>
 
+          </div>
+        </div>
+
+        {/* Chat and Requests Section */}
+        <div className="max-w-7xl mx-auto px-6 pb-12">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden flex flex-col h-[500px]">
+            {/* Tabs */}
+            <div className="flex border-b border-zinc-800 bg-zinc-950">
+              <button 
+                onClick={() => setActiveSocialTab('chat')}
+                className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${activeSocialTab === 'chat' ? 'text-emerald-400 border-b-2 border-emerald-500 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300'}`}
+              >
+                <MessageSquare className="w-4 h-4" /> Chat ao Vivo
+              </button>
+              <button 
+                onClick={() => setActiveSocialTab('requests')}
+                className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${activeSocialTab === 'requests' ? 'text-amber-500 border-b-2 border-amber-500 bg-zinc-900' : 'text-zinc-500 hover:text-zinc-300'}`}
+              >
+                <Music2 className="w-4 h-4" /> Pedidos de Música
+                {musicRequests.filter(r => r.status === 'Aguardando').length > 0 && (
+                  <span className="bg-amber-500 text-zinc-950 text-[10px] px-2 py-0.5 rounded-full ml-2">
+                    {musicRequests.filter(r => r.status === 'Aguardando').length}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 flex flex-col overflow-hidden bg-zinc-900">
+              {!user ? (
+                <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                  <UserCircle className="w-16 h-16 text-zinc-700 mb-4" />
+                  <h3 className="text-xl font-bold mb-2">Faça login para interagir</h3>
+                  <p className="text-zinc-400 mb-6 max-w-md">
+                    Para usar o chat e gerenciar os pedidos de música, você precisa estar logado.
+                  </p>
+                  <button 
+                    onClick={signInWithGoogle}
+                    className="bg-white text-zinc-950 hover:bg-zinc-200 px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-colors"
+                  >
+                    Entrar com Google
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {activeSocialTab === 'chat' && (
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                        {chatMessages.length === 0 ? (
+                          <div className="text-center text-zinc-500 mt-10">Nenhuma mensagem ainda.</div>
+                        ) : (
+                          chatMessages.map(msg => (
+                            <div key={msg.id} className={`flex flex-col ${msg.authorUid === user.uid ? 'items-end' : 'items-start'}`}>
+                              <div className="flex items-baseline gap-2 mb-1">
+                                <span className="text-xs font-bold text-zinc-400">{msg.authorName}</span>
+                                <span className="text-[10px] text-zinc-600">
+                                  {msg.createdAt?.toDate ? format(msg.createdAt.toDate(), 'HH:mm') : ''}
+                                </span>
+                              </div>
+                              <div className={`px-4 py-2 rounded-2xl max-w-[80%] ${msg.authorUid === user.uid ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-zinc-800 text-zinc-200 rounded-tl-none'}`}>
+                                {msg.text}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                        <div ref={chatEndRef} />
+                      </div>
+                      <div className="p-4 bg-zinc-950 border-t border-zinc-800">
+                        <form onSubmit={handleSendChat} className="flex gap-2">
+                          <input 
+                            type="text" 
+                            value={newChatMessage}
+                            onChange={e => setNewChatMessage(e.target.value)}
+                            placeholder="Digite sua mensagem..."
+                            className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500"
+                          />
+                          <button 
+                            type="submit"
+                            disabled={!newChatMessage.trim()}
+                            className="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-zinc-950 p-3 rounded-xl transition-colors"
+                          >
+                            <Send className="w-5 h-5" />
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  )}
+
+                  {activeSocialTab === 'requests' && (
+                    <div className="flex-1 overflow-y-auto p-6">
+                      {musicRequests.length === 0 ? (
+                        <div className="text-center text-zinc-500 mt-10">Nenhum pedido de música.</div>
+                      ) : (
+                        <div className="space-y-3">
+                          {musicRequests.map(req => (
+                            <div key={req.id} className={`flex items-center justify-between p-4 rounded-xl border ${req.status === 'Tocada' ? 'bg-zinc-900/50 border-zinc-800/50 opacity-60' : 'bg-zinc-800 border-zinc-700'}`}>
+                              <div>
+                                <h4 className="font-bold text-white">{req.songName}</h4>
+                                <p className="text-sm text-zinc-400">{req.artistName}</p>
+                                <div className="flex items-center gap-2 mt-2 text-xs text-zinc-500">
+                                  <span>Pedido por: <strong className="text-zinc-300">{req.requestedBy}</strong></span>
+                                  <span>•</span>
+                                  <span>{req.createdAt?.toDate ? format(req.createdAt.toDate(), 'HH:mm') : ''}</span>
+                                </div>
+                              </div>
+                              <div>
+                                {req.status === 'Aguardando' ? (
+                                  <button 
+                                    onClick={() => handleMarkRequestPlayed(req.id)}
+                                    className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 text-amber-500 hover:bg-amber-500 hover:text-zinc-950 rounded-lg text-sm font-bold transition-colors"
+                                  >
+                                    <CheckCircle2 className="w-4 h-4" /> Marcar como Tocada
+                                  </button>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-emerald-500 text-sm font-bold px-4 py-2">
+                                    <CheckCircle2 className="w-4 h-4" /> Tocada
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {user && (
+              <div className="bg-zinc-950 px-6 py-3 border-t border-zinc-800 flex justify-between items-center text-xs text-zinc-500">
+                <span>Logado como <strong>{user.displayName}</strong></span>
+                <button onClick={logOut} className="hover:text-red-400 transition-colors">Sair</button>
+              </div>
+            )}
           </div>
         </div>
 

@@ -1,0 +1,103 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: chat
+    // Document ID: auto-generated
+    // Fields:
+    //   - text: string (required, max 500 chars)
+    //   - authorName: string (required, max 100 chars)
+    //   - authorUid: string (required, matches auth.uid)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: requests
+    // Document ID: auto-generated
+    // Fields:
+    //   - songName: string (required, max 100 chars)
+    //   - artistName: string (required, max 100 chars)
+    //   - requestedBy: string (required, max 100 chars)
+    //   - requesterUid: string (required, matches auth.uid)
+    //   - status: string (required, 'Aguardando' or 'Tocada')
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(uidField) {
+      return isAuthenticated() && request.auth.uid == request.resource.data[uidField];
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+    
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidChatMessage(data) {
+      return hasOnlyAllowedFields(['text', 'authorName', 'authorUid', 'createdAt']) &&
+             validStringLength('text', 1, 500) &&
+             validStringLength('authorName', 1, 100) &&
+             data.authorUid is string && data.authorUid == request.auth.uid &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidMusicRequest(data) {
+      return hasOnlyAllowedFields(['songName', 'artistName', 'requestedBy', 'requesterUid', 'status', 'createdAt']) &&
+             validStringLength('songName', 1, 100) &&
+             validStringLength('artistName', 1, 100) &&
+             validStringLength('requestedBy', 1, 100) &&
+             data.requesterUid is string && data.requesterUid == request.auth.uid &&
+             data.status in ['Aguardando', 'Tocada'] &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /chat/{messageId} {
+      // Anyone can read the chat
+      allow read: if true;
+      // Only authenticated users can create messages
+      allow create: if isAuthenticated() && isValidChatMessage(request.resource.data);
+      // Messages cannot be updated or deleted
+      allow update, delete: if false;
+    }
+
+    match /requests/{requestId} {
+      // Anyone can read the requests
+      allow read: if true;
+      // Only authenticated users can create requests
+      allow create: if isAuthenticated() && isValidMusicRequest(request.resource.data);
+      // Anyone authenticated can update the status (in a real app, only admins/studio operators)
+      // For this prototype, we allow the studio operator to update the status to 'Tocada'
+      allow update: if isAuthenticated() && 
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+                    request.resource.data.status in ['Aguardando', 'Tocada'];
+      allow delete: if false;
+    }
+  }
+}

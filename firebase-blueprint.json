@@ -1,0 +1,77 @@
+{
+  "entities": {
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "A message sent in the live chat.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "The content of the message."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "The display name of the user who sent the message."
+        },
+        "authorUid": {
+          "type": "string",
+          "description": "The UID of the user who sent the message."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the message was sent."
+        }
+      },
+      "required": ["text", "authorName", "authorUid", "createdAt"]
+    },
+    "MusicRequest": {
+      "title": "MusicRequest",
+      "description": "A request for a song to be played.",
+      "type": "object",
+      "properties": {
+        "songName": {
+          "type": "string",
+          "description": "The name of the requested song."
+        },
+        "artistName": {
+          "type": "string",
+          "description": "The name of the artist or band."
+        },
+        "requestedBy": {
+          "type": "string",
+          "description": "The display name of the user who requested the song."
+        },
+        "requesterUid": {
+          "type": "string",
+          "description": "The UID of the user who requested the song."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Aguardando", "Tocada"],
+          "description": "The status of the request."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the request was made."
+        }
+      },
+      "required": ["songName", "artistName", "requestedBy", "requesterUid", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/chat/{messageId}": {
+      "schema": {
+        "$ref": "#/entities/ChatMessage"
+      },
+      "description": "Live chat messages."
+    },
+    "/requests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/MusicRequest"
+      },
+      "description": "Music requests from listeners."
+    }
+  }
+}
