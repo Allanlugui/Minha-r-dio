@@ -160,14 +160,14 @@ export default function App() {
       setUser(currentUser);
     });
 
-    const chatQuery = query(collection(db, 'chat'), orderBy('createdAt', 'asc'), limit(100));
+    const chatQuery = query(collection(db, 'messages'), orderBy('createdAt', 'asc'), limit(100));
     const unsubscribeChat = onSnapshot(chatQuery, (snapshot) => {
       const messages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setChatMessages(messages);
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     });
 
-    const requestsQuery = query(collection(db, 'requests'), orderBy('createdAt', 'desc'), limit(50));
+    const requestsQuery = query(collection(db, 'songRequests'), orderBy('createdAt', 'desc'), limit(50));
     const unsubscribeRequests = onSnapshot(requestsQuery, (snapshot) => {
       const reqs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setMusicRequests(reqs);
@@ -185,10 +185,11 @@ export default function App() {
     if (!newChatMessage.trim() || !user) return;
     
     try {
-      await addDoc(collection(db, 'chat'), {
+      await addDoc(collection(db, 'messages'), {
         text: newChatMessage.trim(),
-        authorName: user.displayName || 'Anônimo',
-        authorUid: user.uid,
+        userName: user.displayName || 'Anônimo',
+        userId: user.uid,
+        userPhoto: user.photoURL || '',
         createdAt: serverTimestamp()
       });
       setNewChatMessage('');
@@ -199,7 +200,7 @@ export default function App() {
 
   const handleMarkRequestPlayed = async (id: string) => {
     try {
-      await updateDoc(doc(db, 'requests', id), {
+      await updateDoc(doc(db, 'songRequests', id), {
         status: 'Tocada'
       });
     } catch (error) {
@@ -1322,7 +1323,7 @@ export default function App() {
         </div>
 
         {/* Chat and Requests Section */}
-        <div className="max-w-7xl mx-auto px-6 pb-12">
+        <div className="lg:col-span-12 pb-12">
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-xl overflow-hidden flex flex-col h-[500px]">
             {/* Tabs */}
             <div className="flex border-b border-zinc-800 bg-zinc-950">
@@ -1370,14 +1371,14 @@ export default function App() {
                           <div className="text-center text-zinc-500 mt-10">Nenhuma mensagem ainda.</div>
                         ) : (
                           chatMessages.map(msg => (
-                            <div key={msg.id} className={`flex flex-col ${msg.authorUid === user.uid ? 'items-end' : 'items-start'}`}>
+                            <div key={msg.id} className={`flex flex-col ${msg.userId === user.uid ? 'items-end' : 'items-start'}`}>
                               <div className="flex items-baseline gap-2 mb-1">
-                                <span className="text-xs font-bold text-zinc-400">{msg.authorName}</span>
+                                <span className="text-xs font-bold text-zinc-400">{msg.userName}</span>
                                 <span className="text-[10px] text-zinc-600">
                                   {msg.createdAt?.toDate ? format(msg.createdAt.toDate(), 'HH:mm') : ''}
                                 </span>
                               </div>
-                              <div className={`px-4 py-2 rounded-2xl max-w-[80%] ${msg.authorUid === user.uid ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-zinc-800 text-zinc-200 rounded-tl-none'}`}>
+                              <div className={`px-4 py-2 rounded-2xl max-w-[80%] ${msg.userId === user.uid ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-zinc-800 text-zinc-200 rounded-tl-none'}`}>
                                 {msg.text}
                               </div>
                             </div>
