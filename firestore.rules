@@ -6,23 +6,29 @@ service cloud.firestore {
     // Assumed Data Model
     // ===============================================================
     //
-    // Collection: chat
+    // Collection: messages
     // Document ID: auto-generated
     // Fields:
     //   - text: string (required, max 500 chars)
-    //   - authorName: string (required, max 100 chars)
-    //   - authorUid: string (required, matches auth.uid)
+    //   - userName: string (required, max 100 chars)
+    //   - userId: string (required, matches auth.uid)
+    //   - userPhoto: string (optional, max 500 chars)
     //   - createdAt: timestamp (required)
     //
-    // Collection: requests
+    // Collection: songRequests
     // Document ID: auto-generated
     // Fields:
     //   - songName: string (required, max 100 chars)
     //   - artistName: string (required, max 100 chars)
     //   - requestedBy: string (required, max 100 chars)
     //   - requesterUid: string (required, matches auth.uid)
-    //   - status: string (required, 'Aguardando' or 'Tocada')
+    //   - status: string (required, 'Aguardando', 'Tocada', 'pending', 'played')
     //   - createdAt: timestamp (required)
+    //
+    // Collection: settings
+    // Document ID: radio
+    // Fields:
+    //   - requestsEnabled: boolean (required)
     //
     // ===============================================================
 
@@ -57,10 +63,11 @@ service cloud.firestore {
     // ===============================================================
 
     function isValidChatMessage(data) {
-      return hasOnlyAllowedFields(['text', 'authorName', 'authorUid', 'createdAt']) &&
+      return hasOnlyAllowedFields(['text', 'userName', 'userId', 'userPhoto', 'createdAt']) &&
              validStringLength('text', 1, 500) &&
-             validStringLength('authorName', 1, 100) &&
-             data.authorUid is string && data.authorUid == request.auth.uid &&
+             validStringLength('userName', 1, 100) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             (!('userPhoto' in data) || validStringLength('userPhoto', 0, 500)) &&
              data.createdAt is timestamp;
     }
 
@@ -70,7 +77,7 @@ service cloud.firestore {
              validStringLength('artistName', 1, 100) &&
              validStringLength('requestedBy', 1, 100) &&
              data.requesterUid is string && data.requesterUid == request.auth.uid &&
-             data.status in ['Aguardando', 'Tocada'] &&
+             data.status in ['Aguardando', 'Tocada', 'pending', 'played'] &&
              data.createdAt is timestamp;
     }
 
@@ -78,7 +85,7 @@ service cloud.firestore {
     // Rules
     // ===============================================================
 
-    match /chat/{messageId} {
+    match /messages/{messageId} {
       // Anyone can read the chat
       allow read: if true;
       // Only authenticated users can create messages
@@ -87,17 +94,25 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    match /requests/{requestId} {
+    match /songRequests/{requestId} {
       // Anyone can read the requests
       allow read: if true;
       // Only authenticated users can create requests
       allow create: if isAuthenticated() && isValidMusicRequest(request.resource.data);
       // Anyone authenticated can update the status (in a real app, only admins/studio operators)
-      // For this prototype, we allow the studio operator to update the status to 'Tocada'
+      // For this prototype, we allow the studio operator to update the status
       allow update: if isAuthenticated() && 
                     request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
-                    request.resource.data.status in ['Aguardando', 'Tocada'];
-      allow delete: if false;
+                    request.resource.data.status in ['Aguardando', 'Tocada', 'pending', 'played'];
+      // Allow deletion to clear requests
+      allow delete: if isAuthenticated();
+    }
+
+    match /settings/{settingId} {
+      // Anyone can read settings
+      allow read: if true;
+      // Anyone authenticated can update settings (in a real app, only admins/studio operators)
+      allow write: if isAuthenticated();
     }
   }
 }

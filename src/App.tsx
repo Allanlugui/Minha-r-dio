@@ -8,7 +8,7 @@ import {
   MessageSquare, Music2, CheckCircle2, UserCircle, Send
 } from 'lucide-react';
 import { db, auth, signInWithGoogle, logOut } from './firebase';
-import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, limit } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, limit, writeBatch, getDocs, setDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { format } from 'date-fns';
 
@@ -125,6 +125,7 @@ export default function App() {
   const [musicRequests, setMusicRequests] = useState<any[]>([]);
   const [newChatMessage, setNewChatMessage] = useState('');
   const [activeSocialTab, setActiveSocialTab] = useState<'chat' | 'requests'>('chat');
+  const [requestsEnabled, setRequestsEnabled] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Helper to set volume for both HTMLAudioElement and Web Audio API GainNode
@@ -173,12 +174,38 @@ export default function App() {
       setMusicRequests(reqs);
     });
 
+    const unsubscribeSettings = onSnapshot(doc(db, 'settings', 'radio'), (docSnap) => {
+      if (docSnap.exists()) {
+        setRequestsEnabled(docSnap.data().requestsEnabled || false);
+      }
+    });
+
     return () => {
       unsubscribeAuth();
       unsubscribeChat();
       unsubscribeRequests();
+      unsubscribeSettings();
     };
   }, []);
+
+  const toggleRequests = async () => {
+    const newState = !requestsEnabled;
+    try {
+      await setDoc(doc(db, 'settings', 'radio'), { requestsEnabled: newState }, { merge: true });
+      
+      if (!newState) {
+        // Clear all requests when turning off
+        const snapshot = await getDocs(collection(db, 'songRequests'));
+        const batch = writeBatch(db);
+        snapshot.docs.forEach((document) => {
+          batch.delete(document.ref);
+        });
+        await batch.commit();
+      }
+    } catch (error) {
+      console.error("Error toggling requests:", error);
+    }
+  };
 
   const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -201,7 +228,7 @@ export default function App() {
   const handleMarkRequestPlayed = async (id: string) => {
     try {
       await updateDoc(doc(db, 'songRequests', id), {
-        status: 'Tocada'
+        status: 'played'
       });
     } catch (error) {
       console.error("Error updating request:", error);
@@ -1408,40 +1435,56 @@ export default function App() {
                   )}
 
                   {activeSocialTab === 'requests' && (
-                    <div className="flex-1 overflow-y-auto p-6">
-                      {musicRequests.length === 0 ? (
-                        <div className="text-center text-zinc-500 mt-10">Nenhum pedido de música.</div>
-                      ) : (
-                        <div className="space-y-3">
-                          {musicRequests.map(req => (
-                            <div key={req.id} className={`flex items-center justify-between p-4 rounded-xl border ${req.status === 'Tocada' ? 'bg-zinc-900/50 border-zinc-800/50 opacity-60' : 'bg-zinc-800 border-zinc-700'}`}>
-                              <div>
-                                <h4 className="font-bold text-white">{req.songName}</h4>
-                                <p className="text-sm text-zinc-400">{req.artistName}</p>
-                                <div className="flex items-center gap-2 mt-2 text-xs text-zinc-500">
-                                  <span>Pedido por: <strong className="text-zinc-300">{req.requestedBy}</strong></span>
-                                  <span>•</span>
-                                  <span>{req.createdAt?.toDate ? format(req.createdAt.toDate(), 'HH:mm') : ''}</span>
+                    <div className="flex flex-col h-full">
+                      <div className="flex items-center justify-between p-4 border-b border-zinc-800 bg-zinc-950/50">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-3 h-3 rounded-full ${requestsEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></div>
+                          <span className="text-sm font-bold text-white">
+                            {requestsEnabled ? 'Pedidos Abertos' : 'Pedidos Fechados'}
+                          </span>
+                        </div>
+                        <button 
+                          onClick={toggleRequests}
+                          className={`px-4 py-2 rounded-lg text-xs font-bold transition-colors ${requestsEnabled ? 'bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white' : 'bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white'}`}
+                        >
+                          {requestsEnabled ? 'ENCERRAR PEDIDOS (LIMPAR)' : 'LIBERAR PEDIDOS'}
+                        </button>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-6">
+                        {musicRequests.length === 0 ? (
+                          <div className="text-center text-zinc-500 mt-10">Nenhum pedido de música.</div>
+                        ) : (
+                          <div className="space-y-3">
+                            {musicRequests.map(req => (
+                              <div key={req.id} className={`flex items-center justify-between p-4 rounded-xl border ${req.status === 'Tocada' || req.status === 'played' ? 'bg-zinc-900/50 border-zinc-800/50 opacity-60' : 'bg-zinc-800 border-zinc-700'}`}>
+                                <div>
+                                  <h4 className="font-bold text-white">{req.songName}</h4>
+                                  <p className="text-sm text-zinc-400">{req.artistName}</p>
+                                  <div className="flex items-center gap-2 mt-2 text-xs text-zinc-500">
+                                    <span>Pedido por: <strong className="text-zinc-300">{req.requestedBy}</strong></span>
+                                    <span>•</span>
+                                    <span>{req.createdAt?.toDate ? format(req.createdAt.toDate(), 'HH:mm') : ''}</span>
+                                  </div>
+                                </div>
+                                <div>
+                                  {req.status !== 'Tocada' && req.status !== 'played' ? (
+                                    <button 
+                                      onClick={() => handleMarkRequestPlayed(req.id)}
+                                      className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 text-amber-500 hover:bg-amber-500 hover:text-zinc-950 rounded-lg text-sm font-bold transition-colors"
+                                    >
+                                      <CheckCircle2 className="w-4 h-4" /> Marcar como Tocada
+                                    </button>
+                                  ) : (
+                                    <span className="flex items-center gap-1 text-emerald-500 text-sm font-bold px-4 py-2">
+                                      <CheckCircle2 className="w-4 h-4" /> Tocada
+                                    </span>
+                                  )}
                                 </div>
                               </div>
-                              <div>
-                                {req.status === 'Aguardando' ? (
-                                  <button 
-                                    onClick={() => handleMarkRequestPlayed(req.id)}
-                                    className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 text-amber-500 hover:bg-amber-500 hover:text-zinc-950 rounded-lg text-sm font-bold transition-colors"
-                                  >
-                                    <CheckCircle2 className="w-4 h-4" /> Marcar como Tocada
-                                  </button>
-                                ) : (
-                                  <span className="flex items-center gap-1 text-emerald-500 text-sm font-bold px-4 py-2">
-                                    <CheckCircle2 className="w-4 h-4" /> Tocada
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </>
